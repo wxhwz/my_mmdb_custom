@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -163,30 +164,36 @@ func buildCustomCityDB(inputFile, outputFile string) error {
 // ASN 数据库处理逻辑
 // ==========================================
 
-func getPeeringDBMap(cachePath, proxyURL, peeringURL string) (map[uint32]string, error) {
+func getPeeringDBMap(cachePath, proxyURL, peeringURL string, force bool) (map[uint32]string, error) {
 	asnMap := make(map[uint32]string)
 
-	// 1. 尝试从本地文件载入
-	if _, err := os.Stat(cachePath); err == nil {
-		fmt.Printf("🔄 发现本地缓存，正在从文件载入 PeeringDB 数据: %s\n", cachePath)
-		if file, err := os.Open(cachePath); err == nil {
-			defer file.Close()
-			var data PeeringDBResponse
-			if err := json.NewDecoder(file).Decode(&data); err == nil {
-				for _, item := range data.Data {
-					if item.Asn != 0 && item.Name != "" {
-						asnMap[item.Asn] = item.Name
+	// 若不是强制下载，先尝试从本地缓存载入
+	if !force {
+		if _, err := os.Stat(cachePath); err == nil {
+			fmt.Printf("🔄 发现本地缓存，正在从文件载入 PeeringDB 数据: %s\n", cachePath)
+			if file, err := os.Open(cachePath); err == nil {
+				defer file.Close()
+				var data PeeringDBResponse
+				if err := json.NewDecoder(file).Decode(&data); err == nil {
+					for _, item := range data.Data {
+						if item.Asn != 0 && item.Name != "" {
+							asnMap[item.Asn] = item.Name
+						}
 					}
+					fmt.Printf("✅ 成功从本地缓存解析了 %d 条 ASN 简短名称。\n", len(asnMap))
+					return asnMap, nil
 				}
-				fmt.Printf("✅ 成功从本地缓存解析了 %d 条 ASN 简短名称。\n", len(asnMap))
-				return asnMap, nil
 			}
+			fmt.Printf("⚠️ 读取本地缓存失败，将尝试重新从网络下载...\n")
+		} else {
+			fmt.Println("ℹ️ 本地无 PeeringDB 缓存文件。")
 		}
-		fmt.Printf("⚠️ 读取本地缓存失败，将尝试重新从网络下载...\n")
+	} else {
+		fmt.Println("🔄 强制下载模式，忽略本地 PeeringDB 缓存。")
 	}
 
 	// 2. 从网络下载
-	fmt.Println("🌐 本地无有效缓存，正在从 PeeringDB 官方 API 下载最新数据...")
+	fmt.Println("🌐 正在从 PeeringDB 官方 API 下载最新数据...")
 
 	transport := &http.Transport{}
 	if proxyURL != "" {
@@ -228,7 +235,7 @@ func getPeeringDBMap(cachePath, proxyURL, peeringURL string) (map[uint32]string,
 		}
 	}
 
-	// 保存缓存
+	// 保存缓存（强制下载时同样会覆盖旧文件）
 	if file, err := os.Create(cachePath); err == nil {
 		defer file.Close()
 		encoder := json.NewEncoder(file)
@@ -241,12 +248,12 @@ func getPeeringDBMap(cachePath, proxyURL, peeringURL string) (map[uint32]string,
 	return asnMap, nil
 }
 
-func buildCustomASNDB(originalDB, newDB, cachePath, proxyURL, peeringURL string) error {
+func buildCustomASNDB(originalDB, newDB, cachePath, proxyURL, peeringURL string, forceDownload bool) error {
 	if _, err := os.Stat(originalDB); os.IsNotExist(err) {
 		return fmt.Errorf("找不到原始数据库文件: %s", originalDB)
 	}
 
-	asnMap, err := getPeeringDBMap(cachePath, proxyURL, peeringURL)
+	asnMap, err := getPeeringDBMap(cachePath, proxyURL, peeringURL, forceDownload)
 	if err != nil {
 		return fmt.Errorf("获取 PeeringDB 数据失败: %w", err)
 	}
@@ -330,20 +337,22 @@ func buildCustomASNDB(originalDB, newDB, cachePath, proxyURL, peeringURL string)
 // 下载辅助函数
 // ==========================================
 
-// downloadFileIfMissing 若本地文件不存在，则从指定 downloadURL 下载
-func downloadFileIfMissing(downloadURL, filePath, proxyURL string) error {
-	if _, err := os.Stat(filePath); err == nil {
-		log.Printf("✅ 本地文件已存在，无需下载: %s", filePath)
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("检查文件状态失败: %w", err)
+// downloadFileIfMissing 根据 force 决定是否强制下载。若 force=false 且文件已存在则直接返回。
+func downloadFileIfMissing(downloadURL, filePath, proxyURL string, force bool) error {
+	if !force {
+		if _, err := os.Stat(filePath); err == nil {
+			log.Printf("✅ 本地文件已存在，无需下载: %s", filePath)
+			return nil
+		}
+	} else {
+		log.Printf("🔄 强制下载模式，将重新下载: %s", filePath)
 	}
 
-	log.Printf("⬇️  本地文件不存在，开始下载: %s -> %s", downloadURL, filePath)
+	log.Printf("⬇️  开始下载: %s -> %s", downloadURL, filePath)
 
 	transport := &http.Transport{}
 	if proxyURL != "" {
-		proxy, err := url.Parse(proxyURL) // 这里 url 指的是 net/url 包，不再被参数遮蔽
+		proxy, err := url.Parse(proxyURL)
 		if err != nil {
 			log.Printf("⚠️ 代理地址解析失败，使用直连: %v", err)
 		} else {
@@ -385,7 +394,7 @@ func downloadFileIfMissing(downloadURL, filePath, proxyURL string) error {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
 
-	log.Printf("✅ 下载完成，已缓存至: %s", filePath)
+	log.Printf("✅ 下载完成，已保存至: %s", filePath)
 	return nil
 }
 
@@ -394,6 +403,10 @@ func downloadFileIfMissing(downloadURL, filePath, proxyURL string) error {
 // ==========================================
 
 func main() {
+	// 解析命令行参数
+	forceDownload := flag.Bool("force", false, "强制重新下载所有依赖文件（GeoLite2-City.mmdb, GeoLite2-ASN.mmdb, peeringdb_net.json）")
+	flag.Parse()
+
 	// ================= 配置区 =================
 	//baseDir := `F:\App_share\tools\mmdbinspect_2.0.0_windows_amd64`
 	baseDir := "."
@@ -418,11 +431,11 @@ func main() {
 	start := time.Now()
 	fmt.Println("========== 检查并下载所需 MMDB 文件 ==========")
 
-	// 自动下载缺失的原始数据库文件
-	if err := downloadFileIfMissing(cityDownloadURL, cityInput, proxyURL); err != nil {
+	// 自动下载缺失的原始数据库文件（或根据 -force 强制下载）
+	if err := downloadFileIfMissing(cityDownloadURL, cityInput, proxyURL, *forceDownload); err != nil {
 		log.Fatalf("❌ 获取 City 数据库失败: %v", err)
 	}
-	if err := downloadFileIfMissing(asnDownloadURL, asnInput, proxyURL); err != nil {
+	if err := downloadFileIfMissing(asnDownloadURL, asnInput, proxyURL, *forceDownload); err != nil {
 		log.Fatalf("❌ 获取 ASN 数据库失败: %v", err)
 	}
 
@@ -432,7 +445,7 @@ func main() {
 	}
 
 	fmt.Println("\n========== 开始处理 ASN 数据库 ==========")
-	if err := buildCustomASNDB(asnInput, asnOutput, asnCache, proxyURL, peeringURL); err != nil {
+	if err := buildCustomASNDB(asnInput, asnOutput, asnCache, proxyURL, peeringURL, *forceDownload); err != nil {
 		log.Printf("❌ 遇到错误停止处理 ASN DB: %v\n", err)
 	}
 
