@@ -45,22 +45,44 @@ type nodeCacheKey struct {
 // City 数据库处理逻辑
 // ==========================================
 
-// extractCustomRecord 精准提取指定字段，并将结构拍扁
+// extractCustomRecord 精准提取指定字段，保留 en 和 cn 结构
 func extractCustomRecord(record map[string]interface{}) mmdbtype.DataType {
 	newRecord := mmdbtype.Map{}
 	hasData := false // 用于标记这条记录是不是空的
 
-	// 1. 提取并拍扁 City
+	// 提取 en 和 cn 语言的辅助闭包函数
+	// MaxMind 默认简体中文的 key 是 "zh-CN"，这里将其转换为你要求的 "cn"
+	extractLangMap := func(names map[string]interface{}) (mmdbtype.Map, bool) {
+		langMap := mmdbtype.Map{}
+		innerHas := false
+
+		if enName, ok := names["en"].(string); ok {
+			langMap["en"] = mmdbtype.String(enName)
+			innerHas = true
+		}
+		// 同时兼顾原始数据中可能存在的 "zh-CN" 或 "cn"
+		if cnName, ok := names["zh-CN"].(string); ok {
+			langMap["cn"] = mmdbtype.String(cnName)
+			innerHas = true
+		} else if cnName, ok := names["cn"].(string); ok {
+			langMap["cn"] = mmdbtype.String(cnName)
+			innerHas = true
+		}
+
+		return langMap, innerHas
+	}
+
+	// 1. 提取 City (保留 en/cn 结构)
 	if city, ok := record["city"].(map[string]interface{}); ok {
 		if names, ok := city["names"].(map[string]interface{}); ok {
-			if enName, ok := names["en"].(string); ok {
-				newRecord["city"] = mmdbtype.String(enName)
+			if cityMap, ok := extractLangMap(names); ok {
+				newRecord["city"] = cityMap
 				hasData = true
 			}
 		}
 	}
 
-	// 2. 提取并拍扁 Country
+	// 2. 提取 Country (names 保留 en/cn 结构)
 	if country, ok := record["country"].(map[string]interface{}); ok {
 		countryMap := mmdbtype.Map{}
 		if isoCode, ok := country["iso_code"].(string); ok {
@@ -68,8 +90,8 @@ func extractCustomRecord(record map[string]interface{}) mmdbtype.DataType {
 			hasData = true
 		}
 		if names, ok := country["names"].(map[string]interface{}); ok {
-			if enName, ok := names["en"].(string); ok {
-				countryMap["names"] = mmdbtype.String(enName)
+			if namesMap, ok := extractLangMap(names); ok {
+				countryMap["names"] = namesMap
 				hasData = true
 			}
 		}
@@ -78,12 +100,12 @@ func extractCustomRecord(record map[string]interface{}) mmdbtype.DataType {
 		}
 	}
 
-	// 3. 提取并拍扁 Subdivisions (省份/州)
+	// 3. 提取 Subdivisions (省份/州，保留 en/cn 结构)
 	if subList, ok := record["subdivisions"].([]interface{}); ok && len(subList) > 0 {
 		if sub0, ok := subList[0].(map[string]interface{}); ok {
 			if names, ok := sub0["names"].(map[string]interface{}); ok {
-				if enName, ok := names["en"].(string); ok {
-					newRecord["subdivisions"] = mmdbtype.String(enName)
+				if subMap, ok := extractLangMap(names); ok {
+					newRecord["subdivisions"] = subMap
 					hasData = true
 				}
 			}
@@ -108,8 +130,8 @@ func buildCustomCityDB(inputFile, outputFile string) error {
 		DatabaseType: "Custom-GeoIP",
 		RecordSize:   int(db.Metadata.RecordSize),
 		IPVersion:    int(db.Metadata.IPVersion),
-		Languages:    []string{"en"},
-		Description:  map[string]string{"en": "Custom Flattened GeoIP Database"},
+		Languages:    []string{"en", "cn"}, // 支持 en 和 cn 两种语言标签
+		Description:  map[string]string{"en": "Custom GeoIP Database with en and cn names"},
 	})
 	if err != nil {
 		return fmt.Errorf("创建写入器失败: %w", err)
@@ -156,7 +178,7 @@ func buildCustomCityDB(inputFile, outputFile string) error {
 	if _, err = writer.WriteTo(outFile); err != nil {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
-	log.Printf("🎉 City 极简版数据库生成成功：%s\n", outputFile)
+	log.Printf("🎉 City 极简双语版数据库生成成功：%s\n", outputFile)
 	return nil
 }
 
@@ -337,7 +359,6 @@ func buildCustomASNDB(originalDB, newDB, cachePath, proxyURL, peeringURL string,
 // 下载辅助函数
 // ==========================================
 
-// downloadFileIfMissing 根据 force 决定是否强制下载。若 force=false 且文件已存在则直接返回。
 func downloadFileIfMissing(downloadURL, filePath, proxyURL string, force bool) error {
 	if !force {
 		if _, err := os.Stat(filePath); err == nil {
@@ -404,13 +425,14 @@ func downloadFileIfMissing(downloadURL, filePath, proxyURL string, force bool) e
 
 func main() {
 	// 解析命令行参数
-	forceDownload := flag.Bool("force", false, "强制重新下载所有依赖文件（GeoLite2-City.mmdb, GeoLite2-ASN.mmdb, peeringdb_net.json）")
+	forceDownload := flag.Bool("force", false, "强制重新下载所有依赖文件")
 	flag.Parse()
 
 	// ================= 配置区 =================
 	//baseDir := `F:\App_share\tools\mmdbinspect_2.0.0_windows_amd64`
-	baseDir := "."
-	// City DB 配置（使用 filepath.Join 保证跨平台路径）
+	baseDir := `.`
+
+	// City DB 配置
 	cityInput := filepath.Join(baseDir, "GeoLite2-City.mmdb")
 	cityOutput := filepath.Join(baseDir, "GeoLite2-City-Custom.mmdb")
 
@@ -419,7 +441,7 @@ func main() {
 	asnOutput := filepath.Join(baseDir, "GeoLite2-ASN-Custom.mmdb")
 	asnCache := filepath.Join(baseDir, "peeringdb_net.json")
 
-	// 下载源地址（如果本地缺失则从这些地址下载）
+	// 下载源地址
 	cityDownloadURL := "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/refs/heads/download/GeoLite2-City.mmdb"
 	asnDownloadURL := "https://raw.githubusercontent.com/P3TERX/GeoLite.mmdb/refs/heads/download/GeoLite2-ASN.mmdb"
 
@@ -431,7 +453,6 @@ func main() {
 	start := time.Now()
 	fmt.Println("========== 检查并下载所需 MMDB 文件 ==========")
 
-	// 自动下载缺失的原始数据库文件（或根据 -force 强制下载）
 	if err := downloadFileIfMissing(cityDownloadURL, cityInput, proxyURL, *forceDownload); err != nil {
 		log.Fatalf("❌ 获取 City 数据库失败: %v", err)
 	}
