@@ -1,0 +1,54 @@
+name: Build and Force Push MMDB to Branch
+
+on:
+  workflow_dispatch: # 手动触发
+  schedule:
+    - cron: '58 0 * * *' # 每周一自动运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 赋予强推分支的权限
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run Go Script
+        run: |
+          if [ ! -f go.mod ]; then
+            go mod init build-mmdb
+            go get github.com/maxmind/mmdbwriter
+            go get github.com/maxmind/mmdbwriter/mmdbtype
+            go get github.com/oschwald/maxminddb-golang
+            go mod tidy
+          fi
+          go run main.go
+
+      - name: Deploy to Independent Branch
+        run: |
+          # 1. 创建一个临时的干净目录，只把生成的文件拷进去
+          mkdir deploy_dir
+          cp *.mmdb deploy_dir/
+          cd deploy_dir
+          
+          # 2. 在该目录下重新初始化一个全新的 Git 仓库（切断历史）
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 3. 切换到一个名为 database 的新分支
+          git checkout -b database
+          
+          # 4. 提交文件
+          git add .
+          git commit -m "Auto-update MMDB files ($(date +'%Y-%m-%d'))"
+          
+          # 5. 强推（--force）到远程仓库的 database 分支，强行覆盖所有历史记录
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" database
